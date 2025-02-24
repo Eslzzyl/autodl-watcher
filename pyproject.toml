@@ -1,0 +1,12 @@
+[project]
+name = "autodl-watcher"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "nuitka>=2.6.7",
+    "pyside6>=6.8.2.1",
+    "requests>=2.32.3",
+    "win11toast>=0.35",
+]
