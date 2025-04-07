@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
     QComboBox,
     QAbstractItemView,
     QDialog,
+    QButtonGroup
 )
 from PySide6.QtCore import QTimer, QThread, Signal, QUrl, QEventLoop, Qt
 from PySide6.QtGui import QColor
@@ -30,10 +31,11 @@ from login import LoginDialog
 class RequestThread(QThread):
     finished = Signal(dict)
 
-    def __init__(self, url, token):
+    def __init__(self, url, token, payload=None):
         super().__init__()
         self.url = url
         self.token = token
+        self.payload = payload or {"page_index": 1, "page_size": 4}
 
     def run(self):
         manager = QNetworkAccessManager()
@@ -42,8 +44,8 @@ class RequestThread(QThread):
         request.setHeader(
             QNetworkRequest.KnownHeaders.ContentTypeHeader, "application/json"
         )
-
-        reply = manager.post(request, b'{"page_index": 1, "page_size": 10}')
+        data_bytes = json.dumps(self.payload).encode()
+        reply = manager.post(request, data_bytes)
 
         loop = QEventLoop()
         reply.finished.connect(loop.quit)
@@ -60,14 +62,21 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("AutoDL Watcher")
-        self.setGeometry(200, 100, 600, 400)
+        self.setGeometry(200, 100, 600, 600)
 
         # 初始化变量
         self.token = ""
         self.monitored_machines = set()
         self.current_machines = {}
+        self.current_page = 1
+        self.page_size = 4
+        # 新增实例分页参数（固定）
+        self.instance_page_index = 1
+        self.instance_page_size = 10
         self.timer = QTimer()
         self.timer.timeout.connect(self.check_status)
+        # 添加实例单选组（自动开机专用）
+        self.instance_radio_group = None
 
         # 初始化UI
         self.init_ui()
@@ -76,6 +85,7 @@ class MainWindow(QMainWindow):
         if self.token:
             self.token_input.setPlainText(self.token)
             self.fetch_machines()  # token存在立即刷新机器列表
+            self.fetch_instances()  # 加载实例列表
 
     def init_ui(self):
         central_widget = QWidget()
@@ -136,6 +146,49 @@ class MainWindow(QMainWindow):
         )
         layout.addWidget(self.table)
 
+        # 新增分页区域
+        pagination_layout = QHBoxLayout()
+        self.prev_button = QPushButton("上一页")
+        self.prev_button.clicked.connect(self.prev_page)
+        pagination_layout.addWidget(self.prev_button)
+        self.page_label = QLabel("第 1 页")
+        pagination_layout.addWidget(self.page_label)
+        self.next_button = QPushButton("下一页")
+        self.next_button.clicked.connect(self.next_page)
+        pagination_layout.addWidget(self.next_button)
+        layout.addLayout(pagination_layout)
+
+        # 新增实例列表区域（在机器分页下方）
+        layout.addWidget(QLabel("实例列表"))
+        self.instance_table = QTableWidget()
+        self.instance_table.setColumnCount(5)
+        self.instance_table.setHorizontalHeaderLabels(
+            ["自动开机", "实例ID", "实例别名", "所在机器", "状态"]
+        )
+        self.instance_table.setEditTriggers(
+            QAbstractItemView.EditTrigger.NoEditTriggers
+        )
+        self.instance_table.horizontalHeader().setSectionResizeMode(
+            QHeaderView.ResizeMode.Interactive
+        )
+        self.instance_table.setMinimumHeight(200)
+        layout.addWidget(self.instance_table)
+        # 新增实例分页区域
+        instance_pagination_layout = QHBoxLayout()
+        self.instance_prev_button = QPushButton("上一页")
+        self.instance_prev_button.clicked.connect(self.instance_prev_page)
+        instance_pagination_layout.addWidget(self.instance_prev_button)
+        self.instance_page_label = QLabel("第 1 页")
+        instance_pagination_layout.addWidget(self.instance_page_label)
+        self.instance_next_button = QPushButton("下一页")
+        self.instance_next_button.clicked.connect(self.instance_next_page)
+        instance_pagination_layout.addWidget(self.instance_next_button)
+        layout.addLayout(instance_pagination_layout)
+        # 新增：创建单选按钮组（全局只允许选择一个）
+        from PySide6.QtWidgets import QButtonGroup
+        self.instance_radio_group = QButtonGroup(self)
+        self.instance_radio_group.setExclusive(True)
+
     def load_token(self):
         try:
             with open("token.txt", "r") as f:
@@ -157,9 +210,9 @@ class MainWindow(QMainWindow):
             return
         # 保存 token 到本地
         self.save_token(self.token)
-
+        payload = {"page_index": self.current_page, "page_size": self.page_size}
         self.thread = RequestThread(
-            "https://private.autodl.com/api/v2/machine/list", self.token
+            "https://private.autodl.com/api/v2/machine/list", self.token, payload
         )
         self.thread.finished.connect(self.update_machine_list)
         self.thread.start()
@@ -231,6 +284,14 @@ class MainWindow(QMainWindow):
             QHeaderView.ResizeMode.Interactive
         )
 
+        # 更新分页按钮状态
+        self.page_label.setText(f"第 {self.current_page} 页")
+        self.prev_button.setEnabled(self.current_page > 1)
+        if len(result["data"]["list"]) < self.page_size:
+            self.next_button.setEnabled(False)
+        else:
+            self.next_button.setEnabled(True)
+
     def update_monitored_machines(self, machine_id, state):
         """根据复选框状态更新监控列表"""
         if state == Qt.CheckState.Checked.value:
@@ -269,9 +330,9 @@ class MainWindow(QMainWindow):
     def check_status(self):
         if not self.token:
             return
-
+        payload = {"page_index": self.current_page, "page_size": self.page_size}
         self.thread = RequestThread(
-            "https://private.autodl.com/api/v2/machine/list", self.token
+            "https://private.autodl.com/api/v2/machine/list", self.token, payload
         )
         self.thread.finished.connect(self.handle_status_update)
         self.thread.start()
@@ -282,6 +343,13 @@ class MainWindow(QMainWindow):
 
         # 从下拉菜单获取监控阈值
         threshold = int(self.threshold_combo.currentText())
+        # 获取用户在实例列表中选择自动开机的实例（如果有）
+        selected_instance = None
+        for rb in self.instance_radio_group.buttons():
+            if rb.isChecked():
+                selected_instance = rb.property("instance_uuid")
+                break
+
         for machine in result["data"]["list"]:
             machine_id = machine["machine_id"]
             if (
@@ -292,14 +360,109 @@ class MainWindow(QMainWindow):
                     f"{machine['machine_name']} 有 {machine['gpu']['idle']} 个空闲GPU！"
                 )
                 print(message)
-                threading.Thread(
-                    target=toast,
-                    args=(message, "立即前往"),
-                    kwargs={"on_click": "https://private.autodl.com/console/machine"},
-                    daemon=True,
-                ).start()
+                if selected_instance:
+                    self.power_on_instance(selected_instance)
+                else:
+                    threading.Thread(
+                        target=toast,
+                        args=(message, "立即前往"),
+                        kwargs={"on_click": "https://private.autodl.com/console/machine"},
+                        daemon=True,
+                    ).start()
 
         self.update_machine_list(result)
+
+    def prev_page(self):
+        if self.current_page > 1:
+            self.current_page -= 1
+            self.fetch_machines()
+
+    def next_page(self):
+        self.current_page += 1
+        self.fetch_machines()
+
+    def fetch_instances(self):
+        if not self.token:
+            return
+        payload = {
+            "page_index": self.instance_page_index,
+            "page_size": self.instance_page_size,
+            "tenant_uuid": self.token,
+        }
+        self.instance_thread = RequestThread(
+            "https://private.autodl.com/api/v2/instance/list", self.token, payload
+        )
+        self.instance_thread.finished.connect(self.update_instance_list)
+        self.instance_thread.start()
+
+    def update_instance_list(self, result):
+        if "error" in result or result.get("code") != "Success":
+            return
+        self.instance_table.setRowCount(0)
+        # 清空上次添加的单选按钮组
+        self.instance_radio_group = QButtonGroup(self)
+        self.instance_radio_group.setExclusive(True)
+        
+        for instance in result["data"]["list"]:
+            row = self.instance_table.rowCount()
+            self.instance_table.insertRow(row)
+            # 新增：自动开机单选按钮在第一列
+            from PySide6.QtWidgets import QRadioButton
+            rb = QRadioButton()
+            rb.setProperty("instance_uuid", instance["instance_uuid"])
+            # 设置单选按钮水平居中
+            rb.setStyleSheet("margin-left:auto; margin-right:auto;")
+            # 判断状态, 状态"开机"禁用该按钮
+            status = instance.get("status", "")
+            display_status = (
+                "关机" if status == "shutdown" else "开机" if status == "running" else status
+            )
+            if display_status == "开机":
+                rb.setEnabled(False)
+            self.instance_radio_group.addButton(rb)
+            self.instance_table.setCellWidget(row, 0, rb)
+            
+            # 实例ID -> 第二列
+            item_id = QTableWidgetItem(instance["instance_uuid"])
+            item_id.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            self.instance_table.setItem(row, 1, item_id)
+            # 实例别名 -> 第三列
+            item_name = QTableWidgetItem(instance["instance_name"])
+            item_name.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            self.instance_table.setItem(row, 2, item_name)
+            # 所在机器 -> 第四列
+            item_machine = QTableWidgetItem(instance["machine_name"])
+            item_machine.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            self.instance_table.setItem(row, 3, item_machine)
+            # 状态 -> 第五列
+            item_status = QTableWidgetItem(display_status)
+            item_status.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            if display_status == "开机":
+                item_status.setForeground(QColor(0, 200, 0))
+            self.instance_table.setItem(row, 4, item_status)
+        
+        # 更新实例分页按钮状态
+        max_page = result["data"].get("max_page", 1)
+        self.instance_page_label.setText(f"第 {self.instance_page_index} 页")
+        self.instance_prev_button.setEnabled(self.instance_page_index > 1)
+        self.instance_next_button.setEnabled(self.instance_page_index < max_page)
+
+    def power_on_instance(self, instance_uuid):
+        # 发起自动开机请求
+        url = "https://private.autodl.com/api/v2/instance/power_on"
+        payload = {"instance_uuid": instance_uuid, "start_mode": "gpu"}
+        # 使用 RequestThread 发送 POST 请求，不关心返回结果
+        thread = RequestThread(url, self.token, payload)
+        thread.start()
+
+    def instance_prev_page(self):
+        if self.instance_page_index > 1:
+            self.instance_page_index -= 1
+            self.fetch_instances()
+
+    def instance_next_page(self):
+        self.instance_page_index += 1
+        self.fetch_instances()
 
     def open_login_dialog(self):
         dialog = LoginDialog(self)
@@ -310,6 +473,7 @@ class MainWindow(QMainWindow):
                 self.token = token
                 self.save_token(token)
                 self.fetch_machines()
+                self.fetch_instances()
 
 
 if __name__ == "__main__":
